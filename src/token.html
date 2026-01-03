@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Qwen OAuth Tokens → OpenAI-compatible Token</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+        max-width: 760px;
+        margin: 32px auto;
+        padding: 0 16px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 12px;
+      }
+      p {
+        line-height: 1.4;
+      }
+      form {
+        margin-top: 16px;
+        border: 1px solid rgba(127, 127, 127, 0.35);
+        border-radius: 12px;
+        padding: 16px;
+      }
+      label {
+        display: block;
+        margin: 12px 0 6px;
+        font-weight: 600;
+      }
+      input[type="text"],
+      textarea {
+        width: 100%;
+        box-sizing: border-box;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 13px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid rgba(127, 127, 127, 0.35);
+      }
+      textarea {
+        min-height: 96px;
+        resize: vertical;
+      }
+      button {
+        margin-top: 14px;
+        padding: 10px 14px;
+        border-radius: 10px;
+        border: 1px solid rgba(127, 127, 127, 0.35);
+        cursor: pointer;
+      }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 13px;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .hidden {
+        display: none;
+      }
+      .error {
+        color: #b00020;
+      }
+      .ok {
+        color: #0b6b0b;
+      }
+      .pill {
+        display: inline-block;
+        padding: 3px 8px;
+        border-radius: 999px;
+        border: 1px solid rgba(127, 127, 127, 0.35);
+        font-size: 12px;
+        opacity: 0.9;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Qwen OAuth Tokens → OpenAI-compatible Token</h1>
+    <p>
+      Paste your <code>access_token</code> and <code>refresh_token</code> (e.g. from
+      <code>~/.qwen/oauth_creds.json</code>). The server will store them in KV with <code>expiry_date</code>.
+    </p>
+
+    <form id="f">
+      <label for="access_token">access_token</label>
+      <textarea id="access_token" name="access_token" spellcheck="false" autocomplete="off" placeholder="eyJ... or any opaque access token"></textarea>
+
+      <label for="refresh_token">refresh_token</label>
+      <textarea id="refresh_token" name="refresh_token" spellcheck="false" autocomplete="off" placeholder="..."></textarea>
+
+      <label for="resource_url">resource_url (optional)</label>
+      <input id="resource_url" name="resource_url" type="text" spellcheck="false" autocomplete="off" placeholder="portal.qwen.ai" />
+
+      <label for="expiry_date">expiry_date (optional; ms since epoch)</label>
+      <input id="expiry_date" name="expiry_date" type="text" spellcheck="false" autocomplete="off" placeholder="e.g. 1730000000000 (from oauth_creds.json)" />
+
+      <div class="row">
+        <button id="submit" type="submit">Save</button>
+        <span id="status" class="pill hidden">…</span>
+      </div>
+    </form>
+
+    <div id="out" class="hidden">
+      <h2>Result</h2>
+      <p>
+        Your OpenAI-compatible token:
+      </p>
+      <div class="row">
+        <input id="oai_token" type="text" readonly />
+        <button id="copy" type="button">Copy</button>
+      </div>
+      <p>
+        Upstream endpoint: <code id="endpoint"></code><br />
+        Expires at (Qwen access token): <code id="expiry"></code>
+      </p>
+      <p>
+        Use it as <code>Authorization: Bearer &lt;token&gt;</code> when calling this worker.
+      </p>
+    </div>
+
+    <script>
+      const f = document.getElementById('f');
+      const statusEl = document.getElementById('status');
+      const out = document.getElementById('out');
+      const oaiTokenEl = document.getElementById('oai_token');
+      const endpointEl = document.getElementById('endpoint');
+      const expiryEl = document.getElementById('expiry');
+      const copyBtn = document.getElementById('copy');
+
+      function setStatus(text, kind) {
+        statusEl.textContent = text;
+        statusEl.classList.remove('hidden', 'error', 'ok');
+        if (kind) statusEl.classList.add(kind);
+      }
+
+      copyBtn.addEventListener('click', async () => {
+        const t = oaiTokenEl.value;
+        if (!t) return;
+        await navigator.clipboard.writeText(t);
+        setStatus('Copied', 'ok');
+        setTimeout(() => statusEl.classList.add('hidden'), 1000);
+      });
+
+      f.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        out.classList.add('hidden');
+        setStatus('Saving…', null);
+
+        const access_token = document.getElementById('access_token').value.trim();
+        const refresh_token = document.getElementById('refresh_token').value.trim();
+        const resource_url = document.getElementById('resource_url').value.trim();
+        const expiry_date_raw = document.getElementById('expiry_date').value.trim();
+        const expiry_date = expiry_date_raw ? Number(expiry_date_raw) : undefined;
+
+        try {
+          const resp = await fetch('/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ access_token, refresh_token, resource_url, expiry_date }),
+          });
+
+          const text = await resp.text();
+          let data;
+          try { data = JSON.parse(text); } catch { data = { error: text }; }
+
+          if (!resp.ok) {
+            setStatus(data.error || `HTTP ${resp.status}`, 'error');
+            return;
+          }
+
+          oaiTokenEl.value = data.token;
+          endpointEl.textContent = data.endpoint;
+          expiryEl.textContent = new Date(data.expiry_date).toISOString();
+          out.classList.remove('hidden');
+          setStatus('Saved', 'ok');
+        } catch (err) {
+          setStatus(String(err), 'error');
+        }
+      });
+    </script>
+  </body>
+</html>
