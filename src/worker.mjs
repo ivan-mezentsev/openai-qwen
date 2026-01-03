@@ -191,6 +191,41 @@ async function route(request, env) {
     return withCORS(new Response(mapped, { status: upstreamResp.status, statusText: upstreamResp.statusText, headers }));
   }
 
+  // Some OpenAI-compatible upstreams (including Qwen) may stream cumulative text in
+  // choices[].delta.content ("text so far") rather than true deltas. Streaming clients
+  // that concatenate deltas will then duplicate the prefix.
+  // Normalize SSE for chat completions to always emit incremental deltas.
+  if (upstreamResp.ok) {
+    const ct = upstreamResp.headers.get("Content-Type") || "";
+    const isSSE = ct.includes("text/event-stream");
+    if (isSSE && upstreamPath === "/chat/completions") {
+      const headers = new Headers(upstreamResp.headers);
+      headers.set("Cache-Control", "no-store");
+      headers.set("Content-Type", "text/event-stream");
+
+      const body = upstreamResp.body
+        .pipeThrough(new TextDecoderStream())
+        .pipeThrough(
+          new TransformStream({
+            transform: normalizeChatCompletionsSSEToDeltas,
+            flush: flushNormalizeChatCompletionsSSE,
+            buffer: "",
+            // Map of choiceIndex -> assistant content emitted so far
+            seenByChoice: {},
+          }),
+        )
+        .pipeThrough(new TextEncoderStream());
+
+      return withCORS(
+        new Response(body, {
+          status: upstreamResp.status,
+          statusText: upstreamResp.statusText,
+          headers,
+        }),
+      );
+    }
+  }
+
   return withCORS(upstreamResp);
 }
 
@@ -585,6 +620,88 @@ function mapChatToResponsesJSON(chatText) {
 }
 
 const RESPONSES_DELIMITER = "\n\n";
+
+const CHAT_SSE_DELIMITER = "\n\n";
+
+function normalizeChatCompletionsSSEToDeltas(chunk, controller) {
+  if (!chunk) return;
+
+  this.buffer = (this.buffer || "") + chunk;
+  const events = this.buffer.split(CHAT_SSE_DELIMITER);
+  for (let i = 0; i < events.length - 1; i++) {
+    const out = normalizeChatCompletionsSSEEvent.call(this, events[i]);
+    if (out) controller.enqueue(out);
+  }
+  this.buffer = events[events.length - 1];
+}
+
+function flushNormalizeChatCompletionsSSE(controller) {
+  if (!this.buffer) return;
+  const out = normalizeChatCompletionsSSEEvent.call(this, this.buffer);
+  if (out) controller.enqueue(out);
+  this.buffer = "";
+}
+
+function normalizeChatCompletionsSSEEvent(eventText) {
+  if (!eventText) return;
+
+  // Preserve non-data lines (e.g., "event:") as-is.
+  const lines = String(eventText).split("\n");
+  let changed = false;
+
+  const outLines = lines.map((line) => {
+    if (!line.startsWith("data: ")) return line;
+
+    const payload = line.substring(6);
+    if (payload.trim() === "[DONE]") {
+      return line;
+    }
+
+    let json;
+    try {
+      json = JSON.parse(payload);
+    } catch {
+      return line;
+    }
+
+    if (!json || !Array.isArray(json.choices)) {
+      return line;
+    }
+
+    this.seenByChoice = this.seenByChoice || {};
+
+    for (let i = 0; i < json.choices.length; i++) {
+      const choice = json.choices[i];
+      if (!choice) continue;
+
+      const idx = (typeof choice.index === "number" ? choice.index : i);
+      const delta = choice.delta;
+      if (!delta) continue;
+
+      const content = delta.content;
+      if (typeof content !== "string" || content.length === 0) continue;
+
+      const prev = typeof this.seenByChoice[idx] === "string" ? this.seenByChoice[idx] : "";
+
+      // If the upstream sends cumulative "text so far", it will start with what we've already emitted.
+      if (content.startsWith(prev)) {
+        const nextDelta = content.substring(prev.length);
+        choice.delta.content = nextDelta;
+        this.seenByChoice[idx] = content;
+      } else {
+        // Otherwise, assume it's already a delta.
+        this.seenByChoice[idx] = prev + content;
+      }
+    }
+
+    changed = true;
+    return "data: " + JSON.stringify(json);
+  });
+
+  // Only rewrite if we had a valid JSON payload; otherwise pass through unchanged.
+  const result = outLines.join("\n");
+  return (changed ? result : eventText) + CHAT_SSE_DELIMITER;
+}
 
 function mapChatSSEToResponsesSSE(chunk, controller) {
   chunk = chunk;

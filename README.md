@@ -39,7 +39,6 @@ automatically refreshes the Qwen access token behind the scenes.
 3. Deploy with Wrangler.
 
     ```shell
-    wrangler dev
     wrangler deploy
     ```
 
