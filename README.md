@@ -67,7 +67,7 @@ Example:
 curl https://<your-worker-domain>/v1/chat/completions \
   -H "Authorization: Bearer sk-qwen-..." \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen-plus","messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"qwen3-coder-plus","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
 ## API compatibility
